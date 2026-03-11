@@ -1,0 +1,82 @@
+import gymnasium as gym
+import numpy as np
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import VecEnvWrapper, VecMonitor
+from procgen import ProcgenEnv
+
+class ProcgenRGBWrapper(VecEnvWrapper):
+    def __init__(self, venv):
+        super().__init__(venv)
+        self.observation_space = gym.spaces.Box(low=0, high=255, shape=(64, 64, 3), dtype=np.uint8)
+        self.action_space = gym.spaces.Discrete(15)
+
+    def reset(self):
+        obs = self.venv.reset()
+        return obs["rgb"]
+
+    def step_async(self, actions):
+        self.venv.step_async(actions)
+
+    def step_wait(self):
+        obs, rewards, dones, infos = self.venv.step_wait()
+        return obs["rgb"], rewards, dones, infos
+
+# start_level=50000 ensures these are levels the agent has never seen during training
+# distribution_mode must match training — both set to "hard"
+raw_env = ProcgenEnv(num_envs=512, env_name="coinrun", start_level=50000, num_levels=0, distribution_mode="hard")
+env = ProcgenRGBWrapper(raw_env)
+env = VecMonitor(env)
+
+model_path = "ppo_coinrun_100mil_impala"
+model = PPO.load(model_path)
+
+episodes_to_test = 1000
+episodes_completed = 0
+wins = 0
+
+print(f"Starting evaluation of '{model_path}' over {episodes_to_test} unseen levels...")
+
+obs = env.reset()
+
+# Keep looping until we have tested the desired number of episodes
+while episodes_completed < episodes_to_test:
+
+    # Ask the model what action to take given the current screen
+    # The underscore discards the state value estimate which we don't need during evaluation
+    # We use stochastic predictions (no deterministic=True) to prevent the agent from getting stuck
+    action, _ = model.predict(obs, deterministic=True)
+
+    # Send the action to the environment and get back the results
+    # obs     = the next frame (64x64x3 pixels)
+    # reward  = points earned this step (10.0 for collecting the coin, 0.0 otherwise)
+    # done    = True if the episode ended (win, death, or timeout)
+    # info    = metadata dict containing episode stats when done=True
+    obs, reward, done, info = env.step(action)
+
+    # Loop over all environments to check if any episodes have finished
+    for i, d in enumerate(done):
+        if d:
+            episodes_completed += 1
+
+            # VecMonitor stores the full episode summary inside info under the "episode" key
+            # We use an empty dict as fallback in case it is missing for any reason
+            episode_info = info[i].get("episode", {})
+
+            # "r" is the total reward accumulated over the episode
+            # Any reward above 0 means the coin was collected, which counts as a win
+            if episode_info.get("r", 0) > 0:
+                wins += 1
+
+        # Print a progress update every 10 episodes to avoid flooding the terminal
+        if episodes_completed % 10 == 0 and episodes_completed > 0:
+            current_rate = (wins / episodes_completed) * 100
+            print(f"Completed {episodes_completed}/{episodes_to_test} episodes... Win Rate: {current_rate:.1f}%")
+
+win_probability = (wins / episodes_to_test) * 100
+
+print("\n--- Final Evaluation Results ---")
+print(f"Model Tested:                {model_path}")
+print(f"Total Attempts:              {episodes_to_test}")
+print(f"Total Wins (Coin Collected): {wins}")
+print(f"Probability of Winning:      {win_probability:.2f}%")
+env.close()
