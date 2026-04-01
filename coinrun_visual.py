@@ -1,13 +1,14 @@
+import stable_baselines3.common.distributions
 import gym
 from stable_baselines3 import PPO
 import numpy as np
 np.bool8 = np.bool
 
 # if i understand it correctly start level is where the clanker starts and num levels is how many levels it goes through
-env = gym.make("procgen:procgen-coinrun-v0", start_level=500, num_levels=100, render_mode = "human")
+env = gym.make("procgen:procgen-ninja-v0", start_level=0, num_levels=100, render_mode = "human", distribution_mode="easy")
 
 #change this to the model you want to test
-model = PPO.load("ppo_coinrun_100mil_impala")
+model = PPO.load("ninja_10mil_impala_easy")
 
 episodes_to_test = 100
 episodes_completed = 0

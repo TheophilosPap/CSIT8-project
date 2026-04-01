@@ -23,37 +23,30 @@ class ProcgenRGBWrapper(VecEnvWrapper):
 
 # start_level=50000 ensures these are levels the agent has never seen during training
 # distribution_mode must match training — both set to "hard"
-raw_env = ProcgenEnv(num_envs=512, env_name="coinrun", start_level=50000, num_levels=0, distribution_mode="hard")
+raw_env = ProcgenEnv(num_envs=512, env_name="coinrun", start_level=0, num_levels=0, distribution_mode="hard")
 env = ProcgenRGBWrapper(raw_env)
 env = VecMonitor(env)
 
-model_path = "ppo_coinrun_100mil_impala"
+model_path = "ppo_coinrun_50mil_128steps"
 model = PPO.load(model_path)
 
-episodes_to_test = 1000
+episodes_to_test = 100000
 episodes_completed = 0
 wins = 0
 
 print(f"Starting evaluation of '{model_path}' over {episodes_to_test} unseen levels...")
 
 obs = env.reset()
+#obs, reward, done, info = env.step(np.array([env.action_space.sample()] * env.num_envs))
+#print("Info dict contents:", info[0])
+#import sys; sys.exit()
 
-# Keep looping until we have tested the desired number of episodes
 while episodes_completed < episodes_to_test:
 
-    # Ask the model what action to take given the current screen
-    # The underscore discards the state value estimate which we don't need during evaluation
-    # We use stochastic predictions (no deterministic=True) to prevent the agent from getting stuck
     action, _ = model.predict(obs, deterministic=True)
 
-    # Send the action to the environment and get back the results
-    # obs     = the next frame (64x64x3 pixels)
-    # reward  = points earned this step (10.0 for collecting the coin, 0.0 otherwise)
-    # done    = True if the episode ended (win, death, or timeout)
-    # info    = metadata dict containing episode stats when done=True
     obs, reward, done, info = env.step(action)
 
-    # Loop over all environments to check if any episodes have finished
     for i, d in enumerate(done):
         if d:
             episodes_completed += 1
@@ -67,7 +60,6 @@ while episodes_completed < episodes_to_test:
             if episode_info.get("r", 0) > 0:
                 wins += 1
 
-        # Print a progress update every 10 episodes to avoid flooding the terminal
         if episodes_completed % 10 == 0 and episodes_completed > 0:
             current_rate = (wins / episodes_completed) * 100
             print(f"Completed {episodes_completed}/{episodes_to_test} episodes... Win Rate: {current_rate:.1f}%")
