@@ -4,10 +4,17 @@ import torch.nn as nn
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecMonitor, VecEnvWrapper
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from stable_baselines3.common.callbacks import BaseCallback
 from gymnasium import spaces
 from procgen import ProcgenEnv
 import numpy as np
 from typing import Callable
+
+eval_start_level = 100_000
+eval_num_levels = 1_000
+coinrun_win_reward = 10.0
+global_seed = 1
+
 # https://stable-baselines3.readthedocs.io/en/master/guide/vec_envs.html
 class ProcgenRGBWrapper(VecEnvWrapper):
     def __init__(self, venv):
@@ -89,58 +96,87 @@ class ImpalaCNN(BaseFeaturesExtractor):
         # normalize pixels [0, 255] → [0, 1]
         return self.linear(self.cnn(observations.float() / 255.0))
 
+class WinRateCallback(BaseCallback):
+    def __init__(self, eval_env, eval_episodes=10000, eval_freq=500_000, verbose=1):
+        super().__init__(verbose)
+        self.eval_env = eval_env
+        self.eval_episodes = eval_episodes
+        self.eval_freq = eval_freq
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps % self.eval_freq < self.training_env.num_envs:
+            wins, episodes = 0, 0
+            obs = self.eval_env.reset()
+            while episodes < self.eval_episodes:
+                action, _ = self.model.predict(obs, deterministic=True)
+                obs, _, dones, infos = self.eval_env.step(action)
+                for done, info in zip(dones, infos):
+                    if done:
+                        episodes += 1
+                        if info.get("episode", {}).get("r", 0) >= coinrun_win_reward:
+                            wins += 1
+            win_rate = wins / self.eval_episodes
+            self.logger.record("eval/test_win_rate", win_rate)
+            if self.verbose:
+                print(f"\n[{self.num_timesteps:,} steps] Test Win Rate: {win_rate*100:.1f}%")
+        return True
+
 def linear_schedule(initial_value: float, final_value: float = 1e-5) -> Callable[[float], float]:
     def func(progress_remaining: float) -> float:
         return final_value + progress_remaining * (initial_value - final_value)
     return func
 
-
 def main():
-    # impala uses a lot of vram, too many env can lead to out of memory error
-    env = ProcgenEnv(num_envs=512, env_name="coinrun", start_level=0, num_levels=0, distribution_mode="hard")
-    env = ProcgenRGBWrapper(env)
-    env = VecMonitor(env)
-    print(f"Initializing {env.num_envs} parallel environments...")
+    nums_envs = 256
+    model_name = "impala_coinrun"
+    print(f"Initializing {nums_envs} train + {nums_envs} eval environments...")
+
+    train_env = VecMonitor(ProcgenRGBWrapper(
+        ProcgenEnv(num_envs=nums_envs, env_name="coinrun", start_level=0, num_levels=0, distribution_mode="hard", rand_seed=global_seed)
+    ))
+    eval_env = VecMonitor(ProcgenRGBWrapper(
+        ProcgenEnv(num_envs=nums_envs, env_name="coinrun", start_level=eval_start_level, num_levels=eval_num_levels, distribution_mode="hard", rand_seed=global_seed)
+    ))
 
     # we pass normalize_images=False so SB3 doesn't divide by 255 before passing to our forward function
     policy_kwargs = dict(
         features_extractor_class=ImpalaCNN,
         features_extractor_kwargs=dict(features_dim=256),
-        normalize_images=False, 
+        normalize_images=False,
     )
 
     model = PPO(
         "CnnPolicy",
-        env,
+        train_env,
         policy_kwargs=policy_kwargs,
         verbose=1,
-        # if i understood it correctly, it is final + progress * (initial - final)
-        learning_rate=linear_schedule(5e-4, 2e-4),
-        # number of steps to collect from the environment before updating the model
+        learning_rate=5e-4,
         n_steps=256,
-        # mini batch size, number of samples collected from the environment before updating the model
-        batch_size=2048,
-        n_epochs=4, 
-        # discount factor, probability of the future being relevant
-        gamma=0.99, 
-        # bias vs variance trade off, lower is more biased but less variance
+        batch_size=8192,
+        n_epochs=3,
+        gamma=0.999,
         gae_lambda=0.95,
-        # entropy coefficient, encourages exploration
-        ent_coef=0.005,
-        # ppo clip range                       
-        clip_range=0.2,    
-        # value function coefficient, weight of the value function loss
-        vf_coef=0.75,
+        ent_coef=0.01,
+        clip_range=0.2,
+        vf_coef=0.5,
+        max_grad_norm=1.0,
         device="cuda",
-        tensorboard_log="./maybeimpala_tensorboard"
+        tensorboard_log="./final_coinrun_tensorboard"
     )
 
-    total_timesteps = 100_000_000
-    print(f"Starting optimized training for {total_timesteps} steps...")
-    model.learn(total_timesteps=total_timesteps, progress_bar=True)
+    callback = WinRateCallback(
+        eval_env=eval_env,
+        eval_episodes=1_000,
+        eval_freq=500_000,
+        verbose=1,
+    )
 
-    model.save("ppo_coinrun_100mil_impala")
+    total_timesteps = 50_000_000
+    print(f"Starting training for {total_timesteps:,} steps...")
+    model.learn(total_timesteps=total_timesteps, progress_bar=True, tb_log_name=model_name, callback=callback)
+
+    model.save(model_name)
     print("Training complete!")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
